@@ -1,0 +1,6 @@
+{
+  "subdomain": "test",
+  "records": [
+    { "name": "@", "type": "CNAME", "value": "example.github.io", "proxied" : "true" }
+  ]
+}
