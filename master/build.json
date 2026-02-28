@@ -1,1 +1,17 @@
-
+{
+  "generatedAt": "2026-02-28T15:10:06Z",
+  "domains": [
+    {
+      "fqdn": "test.029290.xyz",
+      "owner": "notmoli",
+      "records": [
+        {
+          "name": "@",
+          "type": "CNAME",
+          "value": "example.com",
+          "proxied": "true"
+        }
+      ]
+    }
+  ]
+}
