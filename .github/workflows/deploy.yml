@@ -26,24 +26,35 @@ jobs:
             exit 1
           fi
 
+      # 🔹 This backup is optional but SAFE (local only, not CF)
       - name: Backup current build
         run: |
           mkdir -p master
-          if [ -f master/build.json ]; then
-            cp master/build.json master/backup.json
-            echo "📦 Backup saved to master/backup.json"
-          fi
+          cp master/build.json master/backup.json
+          echo "📦 Backup saved to master/backup.json"
 
+      # ===============================
+      # FETCH CLOUDFLARE RECORDS (FIXED)
+      # ===============================
       - name: Fetch Cloudflare DNS records
         run: |
+          set -e
           echo "🌐 Fetching Cloudflare DNS records"
 
           curl -s -X GET \
             "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?per_page=5000" \
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json" \
-          | jq -e '.success == true' > /tmp/cf_raw.json
+            > /tmp/cf_raw.json
 
+          # Validate API success
+          if [[ "$(jq -r '.success' /tmp/cf_raw.json)" != "true" ]]; then
+            echo "❌ Cloudflare API error:"
+            jq '.errors' /tmp/cf_raw.json
+            exit 1
+          fi
+
+          # All records
           jq '.result' /tmp/cf_raw.json > /tmp/cf_all.json
 
           # Only records managed by this system
@@ -51,13 +62,17 @@ jobs:
             map(select(.comment != null and (.comment | contains($tag))))
           ' /tmp/cf_all.json > /tmp/cf_managed.json
 
+          echo "ℹ️ Managed records:"
+          jq 'length' /tmp/cf_managed.json
+
+      # ===============================
+      # APPLY / UPDATE RECORDS
+      # ===============================
       - name: Apply DNS changes
         run: |
           set -e
-
           echo "🔁 Syncing DNS records"
 
-          # Build desired state list
           jq -c '.domains[]' master/build.json | while read domain; do
             FQDN=$(echo "$domain" | jq -r '.fqdn')
             OWNER=$(echo "$domain" | jq -r '.owner')
@@ -66,7 +81,7 @@ jobs:
               NAME=$(echo "$record" | jq -r '.name')
               TYPE=$(echo "$record" | jq -r '.type')
               VALUE=$(echo "$record" | jq -r '.value')
-              PROXIED=$(echo "$record" | jq -r '.proxied // "false"')
+              PROXIED=$(echo "$record" | jq -r '.proxied // false')
 
               if [[ "$NAME" == "@" ]]; then
                 DNS_NAME="$FQDN"
@@ -96,7 +111,6 @@ jobs:
                     \"comment\": \"$MANAGED_TAG owner=$OWNER\"
                   }" \
                 | jq -e '.success == true' > /dev/null
-
               else
                 echo "🔄 Updating $TYPE $DNS_NAME"
 
@@ -116,8 +130,12 @@ jobs:
             done
           done
 
+      # ===============================
+      # DELETE STALE RECORDS (SAFE)
+      # ===============================
       - name: Remove stale Cloudflare records
         run: |
+          set -e
           echo "🧹 Removing stale records"
 
           jq -c '.[]' /tmp/cf_managed.json | while read cf; do
@@ -125,14 +143,14 @@ jobs:
             CF_NAME=$(echo "$cf" | jq -r '.name')
             CF_TYPE=$(echo "$cf" | jq -r '.type')
 
-            FOUND=$(jq -r \
-              --arg name "$CF_NAME" \
-              --arg type "$CF_TYPE" \
-              '
-              .domains[].records[]
-              | select(.type == $type)
-              | .name
-              ' master/build.json | grep -F "$CF_NAME" || true)
+            FOUND=$(jq -r '
+              .domains[] as $d
+              | $d.records[]
+              | if .name == "@"
+                then $d.fqdn
+                else (.name + "." + $d.fqdn)
+                end
+            ' master/build.json | grep -Fx "$CF_NAME" || true)
 
             if [[ -z "$FOUND" ]]; then
               echo "❌ Deleting $CF_TYPE $CF_NAME"
