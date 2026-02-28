@@ -1,0 +1,74 @@
+name: Deploy DNS Records
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    name: Build & Deploy DNS Registry
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      # 1️⃣ Collect all user records
+      - name: Merge all user records
+        run: |
+          mkdir -p master
+          jq -s '.' records/*/*.json > /tmp/all-records.json
+
+      # 2️⃣ Validate global duplicate subdomains
+      - name: Check duplicate subdomains (global)
+        run: |
+          DUPLICATES=$(jq -r '.[].subDomain' /tmp/all-records.json | sort | uniq -d)
+
+          if [ -n "$DUPLICATES" ]; then
+            echo "❌ Duplicate subdomains detected:"
+            echo "$DUPLICATES"
+            exit 1
+          fi
+
+      # 3️⃣ Build master/build.json
+      - name: Build master registry
+        run: |
+          jq -n --slurpfile records /tmp/all-records.json '
+          {
+            generatedAt: (now | todate),
+            totalSubdomains: ($records | length),
+            records: $records
+          }' > master/build.json
+
+      # 4️⃣ Deploy to Cloudflare
+      - name: Deploy to Cloudflare
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+        run: |
+          echo "🚀 Deploying DNS records to Cloudflare"
+          # Replace this with your real deployment script
+          # Example:
+          # node scripts/deploy.js master/build.json
+
+      # 5️⃣ Commit updated build.json
+      - name: Commit updated build.json
+        run: |
+          git config user.name "292-domains-bot"
+          git config user.email "bot@users.noreply.github.com"
+
+          git add master/build.json
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: rebuild DNS registry"
+            git push
+          fi
