@@ -1,0 +1,135 @@
+name: Validate Subdomain PR
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gather changed files
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          git diff --name-status origin/${{ github.base_ref }} > changes.txt
+          cat changes.txt
+
+      - name: Validate PR
+        run: |
+          set -e
+
+          USER="${{ github.actor }}"
+          RESERVED="reserved.txt"
+          BLOCKED="blocked.txt"
+          BUILD="master/build.json"
+          PROTECTED_FILES=("LICENSE" "README.md" "RULES.md" "CONTRIBUTING.md")
+
+          error_exit() {
+            echo "❌ $1"
+            exit 1
+          }
+
+          # Load reserved / blocked
+          mapfile -t RESERVED_NAMES < <( [ -f "$RESERVED" ] && cat "$RESERVED" )
+          mapfile -t BLOCKED_NAMES  < <( [ -f "$BLOCKED" ] && cat "$BLOCKED" )
+
+          # Load existing registry (if exists)
+          if [ -f "$BUILD" ]; then
+            EXISTING_FQDNS=$(jq -r '.domains[].fqdn' "$BUILD")
+            EXISTING_RECORDS=$(jq -c '.domains[] | {fqdn, records}' "$BUILD")
+          else
+            EXISTING_FQDNS=""
+            EXISTING_RECORDS=""
+          fi
+
+          while read STATUS FILE; do
+            echo "Checking $STATUS $FILE"
+
+            # Block workflow edits
+            [[ "$FILE" =~ ^.github/ ]] && error_exit "Editing workflows is not allowed"
+
+            # Block protected files
+            for P in "${PROTECTED_FILES[@]}"; do
+              [[ "$FILE" == "$P" ]] && error_exit "Editing $FILE is not allowed"
+            done
+
+            # Must be user's folder
+            if [[ ! "$FILE" =~ ^records/$USER/[^/]+\.json$ ]]; then
+              error_exit "You can only modify files in records/$USER/"
+            fi
+
+            [[ ! "$STATUS" =~ ^(A|M|D)$ ]] && error_exit "Only add/modify/delete allowed"
+
+            [[ "$STATUS" == "D" ]] && continue
+
+            # JSON validation
+            jq . "$FILE" > /dev/null || error_exit "Invalid JSON in $FILE"
+
+            # Required fields
+            for key in githubUname publicEmail desc domain subDomain records; do
+              jq -e --arg k "$key" '.[$k]' "$FILE" > /dev/null \
+                || error_exit "Missing field '$key'"
+            done
+
+            SUB=$(jq -r '.subDomain' "$FILE")
+            DOMAIN=$(jq -r '.domain' "$FILE")
+            FQDN="$SUB.$DOMAIN"
+            FIRST_LABEL="${SUB%%.*}"
+
+            # Block duplicate FQDNs (global)
+            echo "$EXISTING_FQDNS" | grep -qx "$FQDN" \
+              && error_exit "Subdomain '$FQDN' already exists"
+
+            # Reserved / blocked checks
+            for b in "${BLOCKED_NAMES[@]}"; do
+              [[ "$FIRST_LABEL" == "$b"* ]] && error_exit "'$SUB' is blocked"
+            done
+
+            for r in "${RESERVED_NAMES[@]}"; do
+              [[ "$FIRST_LABEL" == "$r" ]] && error_exit "'$SUB' is reserved"
+            done
+
+            COUNT=$(jq '.records | length' "$FILE")
+            [[ "$COUNT" -eq 0 ]] && error_exit "Records array cannot be empty"
+
+            for i in $(seq 0 $((COUNT - 1))); do
+              NAME=$(jq -r ".records[$i].name" "$FILE")
+              TYPE=$(jq -r ".records[$i].type" "$FILE")
+              VALUE=$(jq -r ".records[$i].value" "$FILE")
+              PROXIED=$(jq ".records[$i].proxied" "$FILE")
+
+              [[ -z "$NAME" || -z "$TYPE" || -z "$VALUE" ]] \
+                && error_exit "Record #$i missing required fields"
+
+              [[ ! "$TYPE" =~ ^(A|AAAA|CNAME|TXT)$ ]] \
+                && error_exit "Invalid record type '$TYPE'"
+
+              # Enforce boolean proxied
+              if [[ "$PROXIED" != "null" ]]; then
+                [[ "$PROXIED" != "true" && "$PROXIED" != "false" ]] \
+                  && error_exit "'proxied' must be boolean true/false"
+              fi
+
+              # Prevent record hijacking
+              while read -r entry; do
+                EXIST_FQDN=$(echo "$entry" | jq -r '.fqdn')
+                echo "$entry" | jq -c '.records[]' | while read -r r; do
+                  R_NAME=$(echo "$r" | jq -r '.name')
+                  R_TYPE=$(echo "$r" | jq -r '.type')
+
+                  if [[ "$R_NAME" == "$NAME" && "$R_TYPE" == "$TYPE" && "$EXIST_FQDN" != "$FQDN" ]]; then
+                    error_exit "Record collision: $NAME $TYPE already used by $EXIST_FQDN"
+                  fi
+                done
+              done <<< "$EXISTING_RECORDS"
+            done
+
+          done < changes.txt
+
+          echo "✅ All validation checks passed"
