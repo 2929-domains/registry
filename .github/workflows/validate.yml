@@ -1,4 +1,4 @@
-name: Validate PR
+name: Validate Subdomain PR
 
 on:
   pull_request:
