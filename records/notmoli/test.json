@@ -1,6 +1,10 @@
 {
-  "subdomain": "test",
-  "records": [
-    { "name": "@", "type": "CNAME", "value": "example.github.io", "proxied" : "true" }
-  ]
+"githubUname": "notmoli",
+"publicEmail": "admin@029290.xyz",
+"desc": "Test Subdomain",
+"domain": "029290.xyz",
+"subDomain": "test",
+"records": [
+ { "name": "@", "type": "CNAME", "value": "example.com", "proxied": "true" },
+]
 }
