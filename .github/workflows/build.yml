@@ -1,0 +1,78 @@
+name: Build DNS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build master registry
+        run: |
+          set -e
+
+          mkdir -p master
+
+          echo "🔧 Building DNS registry"
+
+          TMP=$(mktemp)
+          echo '[]' > "$TMP"
+
+          declare -A CLAIMED
+
+          for file in records/*/*.json; do
+            OWNER=$(echo "$file" | cut -d/ -f2)
+
+            DOMAIN=$(jq -r '.domain' "$file")
+            SUB=$(jq -r '.subDomain' "$file")
+            FQDN="${SUB}.${DOMAIN}"
+
+            KEY="$FQDN"
+
+            if [[ -n "${CLAIMED[$KEY]}" ]]; then
+              echo "❌ Duplicate subdomain detected: $FQDN"
+              echo "   Claimed by: ${CLAIMED[$KEY]} and $OWNER"
+              exit 1
+            fi
+
+            CLAIMED[$KEY]="$OWNER"
+
+            RECORDS=$(jq '.records' "$file")
+
+            jq --arg fqdn "$FQDN" \
+               --arg owner "$OWNER" \
+               --argjson records "$RECORDS" \
+               '. += [{
+                  fqdn: $fqdn,
+                  owner: $owner,
+                  records: $records
+               }]' "$TMP" > "$TMP.new"
+
+            mv "$TMP.new" "$TMP"
+          done
+
+          jq --arg time "$(date -u +%FT%TZ)" \
+             '{ generatedAt: $time, domains: . }' "$TMP" \
+             > master/build.json
+
+          echo "✅ build.json created"
+
+      - name: Commit build.json
+        run: |
+          if git diff --quiet master/build.json; then
+            echo "ℹ️ No changes to commit"
+            exit 0
+          fi
+
+          git config user.name "dns-builder"
+          git config user.email "builder@users.noreply.github.com"
+
+          git add master/build.json
+          git commit -m "chore: rebuild DNS registry"
+          git push
