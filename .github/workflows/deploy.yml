@@ -47,7 +47,8 @@ jobs:
             "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?per_page=500" \
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json" \
-          | jq '.result[] | select(.comment | contains("managed-by=2929-domains"))' \
+          | jq '.result[] 
+           | select((.comment // "") | contains("managed-by=2929-domains"))' \
           > /tmp/cf_managed.json
 
           echo "Managed records:"
