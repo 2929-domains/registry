@@ -5,6 +5,6 @@
   "domain": "029290.xyz",
   "subDomain": "test",
   "records": [
-    { "name": "@", "type": "CNAME", "value": "example.com", "proxied": "true" }
+    { "name": "@", "type": "CNAME", "value": "example.com", "proxied": true }
   ]
 }
