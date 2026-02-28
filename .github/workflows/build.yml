@@ -7,6 +7,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: write
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -20,6 +23,12 @@ jobs:
           mkdir -p master
 
           echo "🔧 Building DNS registry"
+
+          # Backup existing build.json if present
+          if [ -f master/build.json ]; then
+            echo "📦 Backing up existing build.json → backup.json"
+            mv master/build.json master/backup.json
+          fi
 
           TMP=$(mktemp)
           echo '[]' > "$TMP"
@@ -63,16 +72,16 @@ jobs:
 
           echo "✅ build.json created"
 
-      - name: Commit build.json
+      - name: Commit registry changes
         run: |
-          if git diff --quiet master/build.json; then
-            echo "ℹ️ No changes to commit"
+          if git diff --quiet master; then
+            echo "ℹ️ No registry changes to commit"
             exit 0
           fi
 
           git config user.name "dns-builder"
           git config user.email "builder@users.noreply.github.com"
 
-          git add master/build.json
+          git add master/build.json master/backup.json || true
           git commit -m "chore: rebuild DNS registry"
           git push
