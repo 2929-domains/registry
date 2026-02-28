@@ -26,7 +26,7 @@ Each user has a personal folder inside `/records/`:
   "domain" : "",
   "subDomain": "",
   "records": [
-    { "name": "", "type": "A|AAAA|CNAME|TXT", "value": "", "proxied": "true|false" }
+    { "name": "", "type": "A|AAAA|CNAME|TXT", "value": "", "proxied": true|false }
   ]
 }
 ```
