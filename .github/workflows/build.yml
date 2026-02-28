@@ -1,87 +1,149 @@
-name: Build DNS
+name: Deploy DNS
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  build:
+  deploy:
     runs-on: ubuntu-latest
 
-    permissions:
-      contents: write
+    env:
+      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
+      MANAGED_TAG: "managed-by=2929-domains"
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Build master registry
+      - name: Validate build.json exists
+        run: |
+          if [ ! -f master/build.json ]; then
+            echo "❌ master/build.json not found. Run build workflow first."
+            exit 1
+          fi
+
+      - name: Backup current build
+        run: |
+          mkdir -p master
+          if [ -f master/build.json ]; then
+            cp master/build.json master/backup.json
+            echo "📦 Backup saved to master/backup.json"
+          fi
+
+      - name: Fetch Cloudflare DNS records
+        run: |
+          echo "🌐 Fetching Cloudflare DNS records"
+
+          curl -s -X GET \
+            "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?per_page=5000" \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
+            -H "Content-Type: application/json" \
+          | jq -e '.success == true' > /tmp/cf_raw.json
+
+          jq '.result' /tmp/cf_raw.json > /tmp/cf_all.json
+
+          # Only records managed by this system
+          jq --arg tag "$MANAGED_TAG" '
+            map(select(.comment != null and (.comment | contains($tag))))
+          ' /tmp/cf_all.json > /tmp/cf_managed.json
+
+      - name: Apply DNS changes
         run: |
           set -e
 
-          mkdir -p master
+          echo "🔁 Syncing DNS records"
 
-          echo "🔧 Building DNS registry"
+          # Build desired state list
+          jq -c '.domains[]' master/build.json | while read domain; do
+            FQDN=$(echo "$domain" | jq -r '.fqdn')
+            OWNER=$(echo "$domain" | jq -r '.owner')
 
-          # Backup existing build.json if present
-          if [ -f master/build.json ]; then
-            echo "📦 Backing up existing build.json → backup.json"
-            mv master/build.json master/backup.json
-          fi
+            echo "$domain" | jq -c '.records[]' | while read record; do
+              NAME=$(echo "$record" | jq -r '.name')
+              TYPE=$(echo "$record" | jq -r '.type')
+              VALUE=$(echo "$record" | jq -r '.value')
+              PROXIED=$(echo "$record" | jq -r '.proxied // "false"')
 
-          TMP=$(mktemp)
-          echo '[]' > "$TMP"
+              if [[ "$NAME" == "@" ]]; then
+                DNS_NAME="$FQDN"
+              else
+                DNS_NAME="$NAME.$FQDN"
+              fi
 
-          declare -A CLAIMED
+              EXISTING_ID=$(jq -r \
+                --arg name "$DNS_NAME" \
+                --arg type "$TYPE" \
+                '
+                .[] | select(.name == $name and .type == $type) | .id
+                ' /tmp/cf_managed.json | head -n1)
 
-          for file in records/*/*.json; do
-            OWNER=$(echo "$file" | cut -d/ -f2)
+              if [[ -z "$EXISTING_ID" ]]; then
+                echo "➕ Creating $TYPE $DNS_NAME"
 
-            DOMAIN=$(jq -r '.domain' "$file")
-            SUB=$(jq -r '.subDomain' "$file")
-            FQDN="${SUB}.${DOMAIN}"
+                curl -s -X POST \
+                  "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
+                  -H "Authorization: Bearer $CF_API_TOKEN" \
+                  -H "Content-Type: application/json" \
+                  --data "{
+                    \"type\": \"$TYPE\",
+                    \"name\": \"$DNS_NAME\",
+                    \"content\": \"$VALUE\",
+                    \"proxied\": $PROXIED,
+                    \"comment\": \"$MANAGED_TAG owner=$OWNER\"
+                  }" \
+                | jq -e '.success == true' > /dev/null
 
-            KEY="$FQDN"
+              else
+                echo "🔄 Updating $TYPE $DNS_NAME"
 
-            if [[ -n "${CLAIMED[$KEY]}" ]]; then
-              echo "❌ Duplicate subdomain detected: $FQDN"
-              echo "   Claimed by: ${CLAIMED[$KEY]} and $OWNER"
-              exit 1
-            fi
-
-            CLAIMED[$KEY]="$OWNER"
-
-            RECORDS=$(jq '.records' "$file")
-
-            jq --arg fqdn "$FQDN" \
-               --arg owner "$OWNER" \
-               --argjson records "$RECORDS" \
-               '. += [{
-                  fqdn: $fqdn,
-                  owner: $owner,
-                  records: $records
-               }]' "$TMP" > "$TMP.new"
-
-            mv "$TMP.new" "$TMP"
+                curl -s -X PUT \
+                  "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$EXISTING_ID" \
+                  -H "Authorization: Bearer $CF_API_TOKEN" \
+                  -H "Content-Type: application/json" \
+                  --data "{
+                    \"type\": \"$TYPE\",
+                    \"name\": \"$DNS_NAME\",
+                    \"content\": \"$VALUE\",
+                    \"proxied\": $PROXIED,
+                    \"comment\": \"$MANAGED_TAG owner=$OWNER\"
+                  }" \
+                | jq -e '.success == true' > /dev/null
+              fi
+            done
           done
 
-          jq --arg time "$(date -u +%FT%TZ)" \
-             '{ generatedAt: $time, domains: . }' "$TMP" \
-             > master/build.json
-
-          echo "✅ build.json created"
-
-      - name: Commit registry changes
+      - name: Remove stale Cloudflare records
         run: |
-          if git diff --quiet master; then
-            echo "ℹ️ No registry changes to commit"
-            exit 0
-          fi
+          echo "🧹 Removing stale records"
 
-          git config user.name "dns-builder"
-          git config user.email "builder@users.noreply.github.com"
+          jq -c '.[]' /tmp/cf_managed.json | while read cf; do
+            CF_ID=$(echo "$cf" | jq -r '.id')
+            CF_NAME=$(echo "$cf" | jq -r '.name')
+            CF_TYPE=$(echo "$cf" | jq -r '.type')
 
-          git add master/build.json master/backup.json || true
-          git commit -m "chore: rebuild DNS registry"
-          git push
+            FOUND=$(jq -r \
+              --arg name "$CF_NAME" \
+              --arg type "$CF_TYPE" \
+              '
+              .domains[].records[]
+              | select(.type == $type)
+              | .name
+              ' master/build.json | grep -F "$CF_NAME" || true)
+
+            if [[ -z "$FOUND" ]]; then
+              echo "❌ Deleting $CF_TYPE $CF_NAME"
+
+              curl -s -X DELETE \
+                "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$CF_ID" \
+                -H "Authorization: Bearer $CF_API_TOKEN" \
+              | jq -e '.success == true' > /dev/null
+            fi
+          done
+
+      - name: Deployment complete
+        run: |
+          echo "✅ Cloudflare DNS fully synced with build.json"
