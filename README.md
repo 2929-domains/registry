@@ -32,15 +32,14 @@ Place your JSON file in your folder and follow this structure:
 
 ```json
 {
-"githubUname": "yourGitHubUsername",
-"publicEmail": "your-email@example.com",
-"desc": "Short description of your subdomain",
-"domain": "029290.xyz",
-"subDomain": "desired-subdomain",
-"records": [
- { "name": "@", "type": "CNAME", "value": "example.github.io", "proxied": "true" },
- { "name": "panel", "type": "CNAME", "value": "panel.example.io", "proxied": "true" }
-]
+  "githubUname": "",
+  "publicEmail": "admin@029290.xyz",
+  "desc": "Test Subdomain",
+  "domain": "029290.xyz",
+  "subDomain": "test",
+  "records": [
+    { "name": "@", "type": "CNAME", "value": "example.com", "proxied": true }
+  ]
 }
 ```
 > Ensure subDomain is unique and follows rules in DOCS.md.
