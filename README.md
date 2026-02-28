@@ -60,11 +60,11 @@ It allows users to register subdomains under domain like <code>029290.xyz</code>
 <h2 align="center">JSON Format Example</h2>
 
 <pre><code>{
-  "githubUname": "tokisensei",
+  "githubUname": "",
   "publicEmail": "example@gmail.com",
   "desc": "My test subdomain",
   "domain": "029290.xyz",
-  "subDomain": "him",
+  "subDomain": "test",
   "records": [
     { "name": "@", "type": "CNAME", "value": "example.github.io", "proxied": "true" },
     { "name": "panel", "type": "CNAME", "value": "panel.example.io", "proxied": "true" }
