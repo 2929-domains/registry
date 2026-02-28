@@ -1,4 +1,4 @@
-name: Verify PR
+name: Verify Subdomain PR
 
 on:
   pull_request:
@@ -14,70 +14,119 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Get changed files
+      - name: Gather changed files
         id: files
         run: |
           git fetch origin ${{ github.base_ref }}
           git diff --name-status origin/${{ github.base_ref }} > changes.txt
           cat changes.txt
 
-      - name: Validate changes
+      - name: Validate PR
         run: |
           set -e
 
           USER="${{ github.actor }}"
           RESERVED="reserved.txt"
+          PROTECTED_FILES=("LICENSE.md" "README.md" "RULES.md" "CONTRIBUTING.md")
 
-          # Load reserved root-level names
+          # Load reserved subdomains
           if [ -f "$RESERVED" ]; then
             mapfile -t RESERVED_NAMES < "$RESERVED"
           else
             RESERVED_NAMES=()
           fi
 
-          while read status file; do
-            echo "Checking $status $file"
+          error_exit() {
+            echo "❌ $1"
+            exit 1
+          }
 
-            # 1️⃣ Block workflow edits
-            if [[ "$file" =~ ^.github/ ]]; then
-              echo "❌ Editing workflow files is not allowed"
-              exit 1
+          while read STATUS FILE; do
+            echo "Checking $STATUS $FILE"
+
+            # Block workflow edits
+            if [[ "$FILE" =~ ^.github/ ]]; then
+              error_exit "Editing workflow files is not allowed"
             fi
 
-            # 2️⃣ Block reserved.txt edits
-            if [[ "$file" == "$RESERVED" ]]; then
-              echo "❌ Editing reserved.txt is not allowed"
-              exit 1
+            # Block edits to reserved.txt
+            if [[ "$FILE" == "$RESERVED" ]]; then
+              error_exit "Editing reserved.txt is not allowed"
             fi
 
-            # 3️⃣ Must be inside user's folder if inside records/
-            if [[ "$file" =~ ^records/ ]]; then
-              if [[ ! "$file" =~ ^records/$USER/[^/]+\.json$ ]]; then
-                echo "❌ Files inside records/ must be in your own folder: records/$USER/"
-                exit 1
+            # Block edits to protected files
+            for P in "${PROTECTED_FILES[@]}"; do
+              if [[ "$FILE" == "$P" ]]; then
+                error_exit "Editing $FILE is not allowed"
               fi
-            fi
+            done
 
-            # 4️⃣ Only allow CRUD on user's own folder
-            # Status can be: A=added, M=modified, D=deleted
-            if [[ "$file" =~ ^records/$USER/ ]]; then
-              if [[ ! "$status" =~ ^(A|M|D)$ ]]; then
-                echo "❌ Only add, modify, or delete allowed in your folder"
-                exit 1
+            # Must be in user's own folder
+            if [[ "$FILE" =~ ^records/ ]]; then
+              if [[ ! "$FILE" =~ ^records/$USER/[^/]+\.json$ ]]; then
+                error_exit "Files inside records/ must be in your own folder: records/$USER/"
               fi
 
-              # If file exists (added or modified), validate JSON & reserved subdomain
-              if [[ "$status" != "D" ]]; then
-                jq . "$file" > /dev/null || { echo "❌ Invalid JSON in $file"; exit 1; }
+              # Allow add, modify, delete
+              if [[ ! "$STATUS" =~ ^(A|M|D)$ ]]; then
+                error_exit "Only add, modify, or delete allowed in your folder"
+              fi
 
-                SUB=$(jq -r '.subdomain' "$file")
-                for r in "${RESERVED_NAMES[@]}"; do
-                  if [ "$SUB" = "$r" ]; then
-                    echo "❌ Subdomain '$SUB' is reserved at root level"
-                    exit 1
+              # Validate JSON only for add/modify
+              if [[ "$STATUS" != "D" ]]; then
+                # Check valid JSON
+                jq . "$FILE" > /dev/null 2>&1 || error_exit "Invalid JSON in $FILE"
+
+                # Check required fields (camelCase)
+                for key in "githubUname" "publicEmail" "desc" "subDomain" "records"; do
+                  VALUE=$(jq -r --arg k "$key" '.[$k] // empty' "$FILE")
+                  if [[ -z "$VALUE" ]]; then
+                    error_exit "Missing required field '$key' in $FILE"
                   fi
                 done
+
+                # Check records array
+                COUNT=$(jq '.records | length' "$FILE")
+                if [[ "$COUNT" -eq 0 ]]; then
+                  error_exit "'records' array is empty in $FILE"
+                fi
+
+                # Validate each record
+                for i in $(seq 0 $(($COUNT - 1))); do
+                  NAME=$(jq -r ".records[$i].name // empty" "$FILE")
+                  TYPE=$(jq -r ".records[$i].type // empty" "$FILE")
+                  VALUE=$(jq -r ".records[$i].value // empty" "$FILE")
+                  PROXIED=$(jq -r ".records[$i].proxied // empty" "$FILE")
+
+                  if [[ -z "$NAME" || -z "$TYPE" || -z "$VALUE" ]]; then
+                    error_exit "Record #$i in $FILE is missing 'name', 'type', or 'value'"
+                  fi
+
+                  # Allowed types
+                  if [[ ! "$TYPE" =~ ^(A|AAAA|CNAME|TXT)$ ]]; then
+                    error_exit "Record #$i in $FILE has invalid type '$TYPE'"
+                  fi
+
+                  # Proxied can be true/false if exists
+                  if [[ -n "$PROXIED" ]]; then
+                    if [[ ! "$PROXIED" =~ ^(true|false)$ ]]; then
+                      error_exit "Record #$i in $FILE has invalid 'proxied' value '$PROXIED'"
+                    fi
+                  fi
+                done
+
+                # Reserved root-level check
+                SUB=$(jq -r '.subDomain' "$FILE")
+                for r in "${RESERVED_NAMES[@]}"; do
+                  if [[ "$SUB" == "$r" ]]; then
+                    error_exit "Subdomain '$SUB' is reserved at root level"
+                  fi
+                done
+
               fi
+            else
+              # Any files outside records/ cannot be modified/added/deleted
+              error_exit "You cannot CRUD files outside your own records folder"
             fi
 
           done < changes.txt
