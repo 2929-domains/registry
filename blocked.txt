@@ -1,0 +1,19 @@
+# profanity / adult
+fuck*
+sex*
+milf*
+brazzers
+naughtyamerica
+sexy*
+
+# dangerous/confusing
+password
+
+# sensitive / political / religious
+christ*
+hindu*
+islam*
+sikh*
+tao*
+
+# any other blocked words
