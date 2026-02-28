@@ -1,0 +1,146 @@
+name: Deploy DNS
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Apply changes to Cloudflare (true/false)"
+        required: true
+        default: "false"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Validate build.json exists
+        run: |
+          if [ ! -f master/build.json ]; then
+            echo "❌ master/build.json not found"
+            exit 1
+          fi
+
+      - name: Load build data
+        id: build
+        run: |
+          echo "🔎 Loading build.json"
+          jq . master/build.json > /dev/null
+
+      - name: Fetch Cloudflare DNS records (managed only)
+        id: fetch
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
+        run: |
+          echo "🌐 Fetching Cloudflare records"
+
+          curl -s -X GET \
+            "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?per_page=500" \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
+            -H "Content-Type: application/json" \
+          | jq '.result[] | select(.comment | contains("managed-by=2929-domains"))' \
+          > /tmp/cf_managed.json
+
+          echo "Managed records:"
+          jq '.name' /tmp/cf_managed.json
+
+      - name: Backup current managed DNS
+        run: |
+          mkdir -p master
+          cp /tmp/cf_managed.json master/backup.json
+          echo "📦 Backup saved to master/backup.json"
+
+      - name: Sync DNS records
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
+          APPLY: ${{ github.event.inputs.apply }}
+        run: |
+          set -e
+
+          echo "⚙️ Apply mode: $APPLY"
+
+          BUILD_DOMAINS=$(jq -c '.domains[]' master/build.json)
+          CF_RECORDS=$(jq -c '.' /tmp/cf_managed.json)
+
+          declare -A DESIRED
+
+          # Build desired state map
+          while read -r domain; do
+            FQDN=$(echo "$domain" | jq -r '.fqdn')
+            OWNER=$(echo "$domain" | jq -r '.owner')
+
+            echo "$domain" | jq -c '.records[]' | while read -r rec; do
+              NAME=$(echo "$rec" | jq -r '.name')
+              TYPE=$(echo "$rec" | jq -r '.type')
+              VALUE=$(echo "$rec" | jq -r '.value')
+              PROXIED=$(echo "$rec" | jq -r '.proxied // false')
+
+              HOST="$FQDN"
+              [[ "$NAME" != "@" ]] && HOST="$NAME.$FQDN"
+
+              KEY="$HOST|$TYPE|$VALUE"
+              DESIRED["$KEY"]=$(jq -n \
+                --arg name "$HOST" \
+                --arg type "$TYPE" \
+                --arg content "$VALUE" \
+                --argjson proxied "$PROXIED" \
+                --arg comment "managed-by=2929-domains owner=$OWNER" \
+                '{name:$name,type:$type,content:$content,proxied:$proxied,comment:$comment}')
+            done
+          done <<< "$BUILD_DOMAINS"
+
+          echo "🔁 Processing Cloudflare records"
+
+          # Delete or update existing managed records
+          echo "$CF_RECORDS" | jq -c '.' | while read -r rec; do
+            ID=$(echo "$rec" | jq -r '.id')
+            NAME=$(echo "$rec" | jq -r '.name')
+            TYPE=$(echo "$rec" | jq -r '.type')
+            CONTENT=$(echo "$rec" | jq -r '.content')
+
+            KEY="$NAME|$TYPE|$CONTENT"
+
+            if [[ -z "${DESIRED[$KEY]}" ]]; then
+              echo "➖ DELETE $NAME ($TYPE)"
+              if [[ "$APPLY" == "true" ]]; then
+                curl -s -X DELETE \
+                  "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$ID" \
+                  -H "Authorization: Bearer $CF_API_TOKEN" \
+                  -H "Content-Type: application/json"
+              fi
+            else
+              unset DESIRED["$KEY"]
+            fi
+          done
+
+          # Create remaining records
+          for key in "${!DESIRED[@]}"; do
+            echo "➕ CREATE ${key%%|*}"
+            if [[ "$APPLY" == "true" ]]; then
+              curl -s -X POST \
+                "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
+                -H "Authorization: Bearer $CF_API_TOKEN" \
+                -H "Content-Type: application/json" \
+                --data "${DESIRED[$key]}"
+            fi
+          done
+
+          echo "✅ DNS sync completed"
+
+      - name: Summary
+        run: |
+          if [[ "${{ github.event.inputs.apply }}" == "true" ]]; then
+            echo "🚀 Changes APPLIED to Cloudflare"
+          else
+            echo "🧪 Dry-run only (no changes applied)"
+          fi
